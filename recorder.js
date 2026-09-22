@@ -1,6 +1,9 @@
 const { chromium } = require("playwright");
 const fs = require("fs");
 const path = require("path");
+const {
+    createNotificationFilter
+} = require("./notification-filter");
 
 // =========================================================
 // CONFIGURATION
@@ -20,26 +23,6 @@ const START_URL =
 // Size is measured AFTER decoding the CDP payload.
 const LARGE_FRAME_THRESHOLD =
     20 * 1024;
-
-
-// =========================================================
-// NOTIFICATION INDICATORS
-// =========================================================
-
-const INDICATORS = [
-    "group_activity",
-    "all_posts",
-    "group_highlights",
-    "cometnotifications",
-    "cometnotificationsreceivelivequery",
-    "notifications_page",
-    "live_query",
-    "notif_type",
-    "context_id",
-    "content_id",
-    "overlay_has_group",
-    "multi_permalinks"
-];
 
 
 // =========================================================
@@ -223,6 +206,45 @@ const sessionDir =
 ensureDir(
     sessionDir
 );
+
+
+// =========================================================
+// NOTIFICATION FILTER / GROUP SIGNALS
+// =========================================================
+
+const notificationRecordFile =
+    path.join(
+        sessionDir,
+        "notification-events.jsonl"
+    );
+
+
+const notificationFilter =
+    createNotificationFilter({
+        recordFile:
+            notificationRecordFile,
+
+        onNewGroupSignal:
+            signal => {
+
+                let output =
+                    `[GROUP SIGNAL] ${signal.group_id} | ${signal.group_name || "Unknown Group"}`;
+
+                if (
+                    signal.content_id
+                ) {
+                    output +=
+                        ` | content=${signal.content_id}`;
+                }
+
+                output +=
+                    " | 🆕 NEW";
+
+                console.log(
+                    output
+                );
+            }
+    });
 
 
 // =========================================================
@@ -486,6 +508,10 @@ console.log("");
         `[MODE] Saving frames >= ${(LARGE_FRAME_THRESHOLD / 1024).toFixed(0)} KB`
     );
 
+    console.log(
+        `[MODE] Notification records: ${notificationRecordFile}`
+    );
+
     console.log("");
 
     console.log(
@@ -546,14 +572,10 @@ console.log("");
             event => {
 
                 const {
-
                     requestId,
-
                     timestamp:
                         chromeTimestamp,
-
                     response
-
                 } = event;
 
 
@@ -608,25 +630,34 @@ console.log("");
                     );
 
 
-                const lower =
-                    decodedText.toLowerCase();
+                const frameReceivedAt =
+                    timestamp();
 
 
-                const matchedIndicators =
-                    INDICATORS.filter(
-                        indicator =>
-                            lower.includes(
-                                indicator
-                            )
+                // -------------------------------------------------
+                // Structured notification processing.
+                // -------------------------------------------------
+
+                const notificationResult =
+                    notificationFilter.process(
+                        decodedText,
+                        {
+                            receivedAt:
+                                frameReceivedAt,
+
+                            requestId,
+
+                            chromeTimestamp
+                        }
                     );
 
 
-                const isNotificationCandidate =
-                    matchedIndicators.length > 0;
+                const matchedIndicators =
+                    notificationResult.matchedIndicators;
 
 
                 const classification =
-                    isNotificationCandidate
+                    notificationResult.notificationsFound > 0
                         ? "notification_candidate"
                         : "large_websocket_frame";
 
@@ -655,13 +686,13 @@ console.log("");
 
 
                 // -------------------------------------------------
-                // Save complete raw payload + metadata
+                // Save decoded payload + metadata
                 // -------------------------------------------------
 
                 const frame = {
 
                     received_at:
-                        timestamp(),
+                        frameReceivedAt,
 
                     chrome_timestamp:
                         chromeTimestamp,
@@ -686,8 +717,8 @@ console.log("");
                     matched_indicators:
                         matchedIndicators,
 
-                    payload:
-                        decoded.rawPayload
+                    decoded_payload:
+                        decodedText
                 };
 
 
@@ -747,6 +778,10 @@ console.log("");
 
             console.log(
                 `[STOP] Capture saved at: ${sessionDir}`
+            );
+
+            console.log(
+                `[STOP] Notification records saved at: ${notificationRecordFile}`
             );
 
             console.log(
