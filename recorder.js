@@ -505,6 +505,10 @@ console.log("");
     );
 
     console.log(
+        "[MODE] Notification filter runs on EVERY WebSocket frame"
+    );
+
+    console.log(
         `[MODE] Saving frames >= ${(LARGE_FRAME_THRESHOLD / 1024).toFixed(0)} KB`
     );
 
@@ -603,26 +607,12 @@ console.log("");
                     );
 
 
-                // =================================================
-                // SMALL FRAME
-                // =================================================
-
-                if (
-                    actualSize <
-                    LARGE_FRAME_THRESHOLD
-                ) {
-
-                    console.log(
-                        `[FRAME] ${requestId} | ${actualSize} bytes | 👂 LISTENING / NOT SAVING`
-                    );
-
-                    return;
-                }
-
-
-                // =================================================
-                // LARGE FRAME
-                // =================================================
+                // -------------------------------------------------
+                // Decode once.
+                //
+                // The notification detector MUST see every
+                // WebSocket response, including small frames.
+                // -------------------------------------------------
 
                 const decodedText =
                     buffer.toString(
@@ -636,6 +626,11 @@ console.log("");
 
                 // -------------------------------------------------
                 // Structured notification processing.
+                //
+                // IMPORTANT:
+                // This runs BEFORE the 20 KB save threshold.
+                // Small frames are not saved, but they are still
+                // inspected by the notification detector.
                 // -------------------------------------------------
 
                 const notificationResult =
@@ -655,6 +650,32 @@ console.log("");
                 const matchedIndicators =
                     notificationResult.matchedIndicators;
 
+
+                // =================================================
+                // SMALL FRAME
+                //
+                // Do NOT save it.
+                //
+                // But notificationFilter.process() has already
+                // inspected it above.
+                // =================================================
+
+                if (
+                    actualSize <
+                    LARGE_FRAME_THRESHOLD
+                ) {
+
+                    console.log(
+                        `[FRAME] ${requestId} | ${actualSize} bytes | 👂 INSPECTED / NOT SAVING`
+                    );
+
+                    return;
+                }
+
+
+                // =================================================
+                // LARGE FRAME
+                // =================================================
 
                 const classification =
                     notificationResult.notificationsFound > 0

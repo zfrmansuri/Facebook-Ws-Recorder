@@ -15,69 +15,39 @@ const NOTIFICATION_INDICATORS = [
     "multi_permalinks"
 ];
 
+
+// =========================================================
+// FILE
+// =========================================================
+
 function appendJsonl(file, value) {
+    if (!file) {
+        return;
+    }
+
     fs.appendFileSync(
         file,
         JSON.stringify(value) + "\n"
     );
 }
 
-function firstValue(object, keys) {
-    if (!object || typeof object !== "object") {
-        return null;
-    }
 
-    const wanted = new Set(keys);
+// =========================================================
+// OBJECT WALKER
+// =========================================================
 
-    const stack = [object];
+function walk(root, visitor) {
+    const stack = [root];
     const visited = new Set();
 
     while (stack.length > 0) {
         const current = stack.pop();
 
-        if (!current || typeof current !== "object") {
-            continue;
-        }
-
-        if (visited.has(current)) {
-            continue;
-        }
-
-        visited.add(current);
-
-        if (!Array.isArray(current)) {
-            for (const key of wanted) {
-                if (
-                    Object.prototype.hasOwnProperty.call(
-                        current,
-                        key
-                    ) &&
-                    current[key] !== null &&
-                    current[key] !== undefined
-                ) {
-                    return current[key];
-                }
-            }
-        }
-
-        for (const value of Object.values(current)) {
-            if (value && typeof value === "object") {
-                stack.push(value);
-            }
-        }
-    }
-
-    return null;
-}
-
-function walk(object, visitor) {
-    const stack = [object];
-    const visited = new Set();
-
-    while (stack.length > 0) {
-        const current = stack.pop();
-
-        if (!current || typeof current !== "object") {
+        if (
+            current === null ||
+            current === undefined ||
+            typeof current !== "object"
+        ) {
             continue;
         }
 
@@ -90,15 +60,26 @@ function walk(object, visitor) {
         visitor(current);
 
         for (const value of Object.values(current)) {
-            if (value && typeof value === "object") {
+            if (
+                value !== null &&
+                typeof value === "object"
+            ) {
                 stack.push(value);
             }
         }
     }
 }
 
+
+// =========================================================
+// SAFE JSON PARSING
+// =========================================================
+
 function parseJsonString(value) {
-    if (typeof value === "object" && value !== null) {
+    if (
+        value !== null &&
+        typeof value === "object"
+    ) {
         return value;
     }
 
@@ -113,21 +94,48 @@ function parseJsonString(value) {
     }
 }
 
+
+// =========================================================
+// BALANCED JSON EXTRACTION
+//
+// Facebook prepends binary/protocol bytes before the JSON.
+// We therefore cannot JSON.parse(decodedText) directly.
+//
+// This parser understands strings and escaped characters,
+// so braces inside URLs/text/tracking strings do not break it.
+// =========================================================
+
 function extractBalancedJson(text, start) {
+    if (
+        start < 0 ||
+        start >= text.length
+    ) {
+        return null;
+    }
+
     const opening = text[start];
 
-    if (opening !== "{" && opening !== "[") {
+    if (
+        opening !== "{" &&
+        opening !== "["
+    ) {
         return null;
     }
 
     const stack = [
-        opening === "{" ? "}" : "]"
+        opening === "{"
+            ? "}"
+            : "]"
     ];
 
     let inString = false;
     let escaped = false;
 
-    for (let i = start + 1; i < text.length; i++) {
+    for (
+        let i = start + 1;
+        i < text.length;
+        i++
+    ) {
         const char = text[i];
 
         if (inString) {
@@ -135,27 +143,40 @@ function extractBalancedJson(text, start) {
                 escaped = false;
             } else if (char === "\\") {
                 escaped = true;
-            } else if (char === '"') {
+            } else if (char === "\"") {
                 inString = false;
             }
 
             continue;
         }
 
-        if (char === '"') {
+        if (char === "\"") {
             inString = true;
             continue;
         }
 
-        if (char === "{" || char === "[") {
+        if (
+            char === "{" ||
+            char === "["
+        ) {
             stack.push(
-                char === "{" ? "}" : "]"
+                char === "{"
+                    ? "}"
+                    : "]"
             );
+
             continue;
         }
 
-        if (char === "}" || char === "]") {
-            if (stack[stack.length - 1] !== char) {
+        if (
+            char === "}" ||
+            char === "]"
+        ) {
+            if (
+                stack[
+                    stack.length - 1
+                ] !== char
+            ) {
                 return null;
             }
 
@@ -173,27 +194,117 @@ function extractBalancedJson(text, start) {
     return null;
 }
 
+
+// =========================================================
+// FIND MAIN FACEBOOK JSON ROOT
+//
+// Current payload shape:
+//
+// [binary protocol prefix]
+// {"last_response_digest":"..."}
+// [binary bytes]
+// {"data":{...notifications_page...}}
+//
+// We specifically search for JSON roots beginning with
+// {"data": and choose the one containing notifications_page.
+//
+// We do NOT assume byte offset 79/80.
+// =========================================================
+
 function parsePayloadJson(text) {
-    const candidates = [];
+    const rootMarkers = [
+        "{\"data\":",
+        "{\"data\" :"
+    ];
 
-    for (let i = 0; i < text.length; i++) {
-        if (
-            text[i] === "{" ||
-            text[i] === "["
+    let searchFrom = 0;
+
+    while (
+        searchFrom < text.length
+    ) {
+        let bestIndex = -1;
+
+        for (
+            const marker of rootMarkers
         ) {
-            candidates.push(i);
+            const index =
+                text.indexOf(
+                    marker,
+                    searchFrom
+                );
 
-            if (candidates.length >= 50) {
-                break;
+            if (
+                index !== -1 &&
+                (
+                    bestIndex === -1 ||
+                    index < bestIndex
+                )
+            ) {
+                bestIndex = index;
             }
         }
-    }
 
-    for (const start of candidates) {
+        if (bestIndex === -1) {
+            break;
+        }
+
         const candidate =
             extractBalancedJson(
                 text,
-                start
+                bestIndex
+            );
+
+        if (candidate) {
+            try {
+                const parsed =
+                    JSON.parse(
+                        candidate
+                    );
+
+                if (
+                    parsed &&
+                    typeof parsed === "object"
+                ) {
+                    return parsed;
+                }
+            } catch {
+                // Continue searching for another root.
+            }
+        }
+
+        searchFrom =
+            bestIndex + 1;
+    }
+
+    // -----------------------------------------------------
+    // Fallback:
+    //
+    // If Facebook changes whitespace or the root shape,
+    // scan JSON-looking objects but cap the attempts so
+    // this cannot become an expensive O(n²) operation.
+    // -----------------------------------------------------
+
+    let attempts = 0;
+
+    for (
+        let i = 0;
+        i < text.length &&
+        attempts < 200;
+        i++
+    ) {
+        if (
+            text[i] !== "{" &&
+            text[i] !== "["
+        ) {
+            continue;
+        }
+
+        attempts++;
+
+        const candidate =
+            extractBalancedJson(
+                text,
+                i
             );
 
         if (!candidate) {
@@ -201,14 +312,73 @@ function parsePayloadJson(text) {
         }
 
         try {
-            return JSON.parse(candidate);
+            const parsed =
+                JSON.parse(
+                    candidate
+                );
+
+            if (
+                parsed &&
+                typeof parsed === "object" &&
+                containsNotificationsPage(
+                    parsed
+                )
+            ) {
+                return parsed;
+            }
         } catch {
-            // Try the next possible JSON root.
+            // Try next candidate.
         }
     }
 
     return null;
 }
+
+
+// =========================================================
+// CHECK WHETHER AN OBJECT CONTAINS notifications_page
+// =========================================================
+
+function containsNotificationsPage(root) {
+    let found = false;
+
+    walk(
+        root,
+        object => {
+            if (
+                Object.prototype.hasOwnProperty.call(
+                    object,
+                    "notifications_page"
+                )
+            ) {
+                found = true;
+            }
+        }
+    );
+
+    return found;
+}
+
+
+// =========================================================
+// FIND ACTUAL NOTIFICATION OBJECTS
+//
+// Important:
+//
+// tracking itself contains:
+//
+// {
+//     "notif_type": "group_activity",
+//     "subtype": "all_posts",
+//     ...
+// }
+//
+// Therefore we MUST require the outer object to also have
+// a "tracking" property.
+//
+// This prevents the tracking JSON object itself from being
+// mistaken for the notification.
+// =========================================================
 
 function findNotificationObjects(root) {
     const notifications = [];
@@ -217,24 +387,38 @@ function findNotificationObjects(root) {
         root,
         object => {
             if (
-                typeof object.notif_type === "string" &&
-                (
-                    typeof object.tracking === "string" ||
-                    (
-                        object.tracking &&
-                        typeof object.tracking === "object"
-                    )
-                )
+                typeof object.notif_type !==
+                    "string"
             ) {
-                notifications.push(
-                    object
-                );
+                return;
             }
+
+            const hasTracking =
+                typeof object.tracking ===
+                    "string" ||
+                (
+                    object.tracking !== null &&
+                    typeof object.tracking ===
+                        "object"
+                );
+
+            if (!hasTracking) {
+                return;
+            }
+
+            notifications.push(
+                object
+            );
         }
     );
 
     return notifications;
 }
+
+
+// =========================================================
+// FIND GROUP ENTITY
+// =========================================================
 
 function findGroupEntity(body) {
     let result = null;
@@ -242,25 +426,24 @@ function findGroupEntity(body) {
     walk(
         body,
         object => {
-            if (result || !object.entity) {
+            if (result) {
+                return;
+            }
+
+            if (
+                !object.entity ||
+                typeof object.entity !==
+                    "object"
+            ) {
                 return;
             }
 
             const entity =
                 object.entity;
 
-            if (
-                !entity ||
-                typeof entity !== "object" ||
-                !entity.id
-            ) {
+            if (!entity.id) {
                 return;
             }
-
-            const url =
-                entity.url ||
-                entity.profile_url ||
-                "";
 
             const type =
                 String(
@@ -269,9 +452,16 @@ function findGroupEntity(body) {
                     ""
                 ).toLowerCase();
 
+            const url =
+                String(
+                    entity.url ||
+                    entity.profile_url ||
+                    ""
+                ).toLowerCase();
+
             if (
                 type.includes("group") ||
-                String(url).includes("/groups/")
+                url.includes("/groups/")
             ) {
                 result = entity;
             }
@@ -281,16 +471,133 @@ function findGroupEntity(body) {
     return result;
 }
 
+
+// =========================================================
+// GROUP NAME
+//
+// Group entities in the captured payload often contain no
+// "name" field.
+//
+// Examples of body.text:
+//
+// "Now in Luxury Real Estate Group: \"...\""
+// "Now in Real Estate & Construction Business: \"...\""
+// "USA Real Estate Investors has a new post."
+// =========================================================
+
+function deriveGroupName(
+    groupEntity,
+    bodyText
+) {
+    if (
+        groupEntity &&
+        (
+            groupEntity.name ||
+            groupEntity.title
+        )
+    ) {
+        return (
+            groupEntity.name ||
+            groupEntity.title
+        );
+    }
+
+    if (
+        typeof bodyText !== "string"
+    ) {
+        return null;
+    }
+
+    const nowInMatch =
+        bodyText.match(
+            /^Now in\s+(.+?):\s*/i
+        );
+
+    if (nowInMatch) {
+        return nowInMatch[1].trim();
+    }
+
+    const newPostMatch =
+        bodyText.match(
+            /^(.+?)\s+has a new post\.?$/i
+        );
+
+    if (newPostMatch) {
+        return newPostMatch[1].trim();
+    }
+
+    return null;
+}
+
+
+// =========================================================
+// NORMALIZE ID
+// =========================================================
+
 function normalizeId(value) {
     if (
         value === null ||
-        value === undefined
+        value === undefined ||
+        value === ""
     ) {
         return null;
     }
 
     return String(value);
 }
+
+
+// =========================================================
+// URL QUERY PARAMETER
+// =========================================================
+
+function getQueryParameter(
+    url,
+    parameter
+) {
+    if (
+        typeof url !== "string"
+    ) {
+        return null;
+    }
+
+    try {
+        const parsed =
+            new URL(url);
+
+        return (
+            parsed.searchParams.get(
+                parameter
+            ) || null
+        );
+    } catch {
+        // Facebook URLs can occasionally be
+        // partially malformed. Use a fallback.
+        const escaped =
+            parameter.replace(
+                /[.*+?^${}()|[\]\\]/g,
+                "\\$&"
+            );
+
+        const match =
+            url.match(
+                new RegExp(
+                    `[?&]${escaped}=([^&#]+)`
+                )
+            );
+
+        return match
+            ? decodeURIComponent(
+                match[1]
+            )
+            : null;
+    }
+}
+
+
+// =========================================================
+// CREATE FILTER
+// =========================================================
 
 function createNotificationFilter({
     recordFile,
@@ -305,6 +612,23 @@ function createNotificationFilter({
             decodedText,
             frameContext = {}
         ) {
+            if (
+                typeof decodedText !==
+                "string" ||
+                decodedText.length === 0
+            ) {
+                return {
+                    notificationsFound: 0,
+                    newSignals: 0,
+                    matchedIndicators: [],
+                    events: []
+                };
+            }
+
+            // -------------------------------------------------
+            // CHEAP FIRST PASS
+            // -------------------------------------------------
+
             const lower =
                 decodedText.toLowerCase();
 
@@ -316,6 +640,7 @@ function createNotificationFilter({
                         )
                 );
 
+            // Most WebSocket frames die here.
             if (
                 !lower.includes(
                     "notifications_page"
@@ -324,9 +649,14 @@ function createNotificationFilter({
                 return {
                     notificationsFound: 0,
                     newSignals: 0,
-                    matchedIndicators
+                    matchedIndicators,
+                    events: []
                 };
             }
+
+            // -------------------------------------------------
+            // PARSE FACEBOOK JSON ROOT
+            // -------------------------------------------------
 
             const root =
                 parsePayloadJson(
@@ -338,72 +668,130 @@ function createNotificationFilter({
                     notificationsFound: 0,
                     newSignals: 0,
                     matchedIndicators,
+                    events: [],
                     parseFailed: true
                 };
             }
+
+            // -------------------------------------------------
+            // FIND OUTER NOTIFICATION OBJECTS
+            // -------------------------------------------------
 
             const notifications =
                 findNotificationObjects(
                     root
                 );
 
-            const groupNotifications =
-                notifications.filter(
-                    notification =>
-                        notification.notif_type ===
-                            "group_activity" &&
-                        String(
-                            notification.subtype || ""
-                        ) === "all_posts"
-                );
+            if (
+                notifications.length === 0
+            ) {
+                return {
+                    notificationsFound: 0,
+                    newSignals: 0,
+                    matchedIndicators,
+                    events: []
+                };
+            }
 
-            let newSignals = 0;
+            // -------------------------------------------------
+            // IMPORTANT:
+            //
+            // Parse tracking BEFORE checking subtype.
+            //
+            // subtype is inside tracking in the real payload.
+            // -------------------------------------------------
 
-            const extracted = [];
+            const candidates = [];
 
             for (
-                const notification of groupNotifications
+                const notification of
+                    notifications
             ) {
+                if (
+                    notification.notif_type !==
+                    "group_activity"
+                ) {
+                    continue;
+                }
+
                 const tracking =
                     parseJsonString(
                         notification.tracking
-                    ) || {};
+                    );
 
+                if (!tracking) {
+                    continue;
+                }
+
+                const subtype =
+                    String(
+                        tracking.subtype ||
+                        ""
+                    );
+
+                if (
+                    subtype !==
+                    "all_posts"
+                ) {
+                    continue;
+                }
+
+                candidates.push({
+                    notification,
+                    tracking
+                });
+            }
+
+            if (
+                candidates.length === 0
+            ) {
+                return {
+                    notificationsFound: 0,
+                    newSignals: 0,
+                    matchedIndicators,
+                    events: []
+                };
+            }
+
+            // -------------------------------------------------
+            // DEDUPLICATE WITHIN THIS SINGLE RESPONSE
+            //
+            // Facebook sends the same notification twice:
+            //
+            // notif
+            // navigation_endpoint...notif
+            //
+            // Both represent the same event.
+            // -------------------------------------------------
+
+            const frameEventKeys =
+                new Set();
+
+            const extracted = [];
+
+            let newSignals = 0;
+
+            for (
+                const {
+                    notification,
+                    tracking
+                } of candidates
+            ) {
                 const contextId =
                     normalizeId(
-                        firstValue(
-                            tracking,
-                            ["context_id"]
-                        )
+                        tracking.context_id
                     );
 
                 const contentId =
                     normalizeId(
-                        firstValue(
-                            tracking,
-                            ["content_id"]
-                        )
+                        tracking.content_id
                     );
 
                 const notifId =
                     normalizeId(
-                        firstValue(
-                            tracking,
-                            ["notif_id"]
-                        ) ||
+                        tracking.notif_id ||
+                        tracking.alert_id ||
                         notification.notif_id
-                    );
-
-                const microtimeSent =
-                    firstValue(
-                        tracking,
-                        ["microtime_sent"]
-                    );
-
-                const creationTime =
-                    firstValue(
-                        tracking,
-                        ["creation_time"]
                     );
 
                 const groupEntity =
@@ -425,12 +813,17 @@ function createNotificationFilter({
                         null
                     );
 
+                const bodyText =
+                    notification.body &&
+                    typeof notification.body.text ===
+                        "string"
+                        ? notification.body.text
+                        : null;
+
                 const groupName =
-                    groupEntity &&
-                    (
-                        groupEntity.name ||
-                        groupEntity.title ||
-                        null
+                    deriveGroupName(
+                        groupEntity,
+                        bodyText
                     );
 
                 const contextMatchesGroup =
@@ -440,35 +833,72 @@ function createNotificationFilter({
                         contextId === groupId
                     );
 
+                const notificationUrl =
+                    notification.url ||
+                    null;
+
+                const multiPermalinks =
+                    getQueryParameter(
+                        notificationUrl,
+                        "multi_permalinks"
+                    );
+
+                // -------------------------------------------------
+                // We currently use context_id + content_id as
+                // the stable event identity.
+                //
+                // Do NOT call multi_permalinks the canonical
+                // post ID yet. Your captures show that it can
+                // differ from content_id.
+                // -------------------------------------------------
+
                 const eventKey =
                     contextId &&
                     contentId
                         ? `${contextId}:${contentId}`
                         : null;
 
-                let state = "ignored";
+                // Invalid/incomplete notification.
+                if (
+                    !contextMatchesGroup ||
+                    !eventKey
+                ) {
+                    continue;
+                }
+
+                // Duplicate copy inside the same WebSocket frame.
+                if (
+                    frameEventKeys.has(
+                        eventKey
+                    )
+                ) {
+                    continue;
+                }
+
+                frameEventKeys.add(
+                    eventKey
+                );
+
+                let state;
 
                 if (
-                    contextMatchesGroup &&
-                    eventKey
+                    !baselineEstablished
                 ) {
-                    if (!baselineEstablished) {
-                        state = "baseline";
-                    } else if (
-                        seenEvents.has(
-                            eventKey
-                        )
-                    ) {
-                        state = "duplicate";
-                    } else {
-                        state = "new";
-                        newSignals++;
-                    }
-
-                    seenEvents.add(
+                    state = "baseline";
+                } else if (
+                    seenEvents.has(
                         eventKey
-                    );
+                    )
+                ) {
+                    state = "duplicate";
+                } else {
+                    state = "new";
+                    newSignals++;
                 }
+
+                seenEvents.add(
+                    eventKey
+                );
 
                 const event = {
                     recorded_at:
@@ -490,7 +920,7 @@ function createNotificationFilter({
                         notification.notif_type,
 
                     subtype:
-                        notification.subtype ||
+                        tracking.subtype ||
                         null,
 
                     state,
@@ -517,19 +947,24 @@ function createNotificationFilter({
                         notifId,
 
                     microtime_sent:
-                        microtimeSent ??
+                        tracking.microtime_sent ??
                         null,
 
                     creation_time:
-                        creationTime ??
+                        notification.creation_time ??
                         null,
 
                     context_matches_group:
                         contextMatchesGroup,
 
                     notification_url:
-                        notification.url ||
-                        null
+                        notificationUrl,
+
+                    multi_permalinks:
+                        multiPermalinks,
+
+                    notification_text:
+                        bodyText
                 };
 
                 appendJsonl(
@@ -542,14 +977,30 @@ function createNotificationFilter({
                 );
             }
 
+            // -------------------------------------------------
+            // BASELINE
+            //
+            // The first valid batch establishes the existing
+            // notification state.
+            //
+            // If a response contains no valid group events,
+            // baseline remains untouched.
+            // -------------------------------------------------
+
             if (
-                groupNotifications.length > 0 &&
+                extracted.length > 0 &&
                 !baselineEstablished
             ) {
                 baselineEstablished = true;
             }
 
-            for (const signal of extracted) {
+            // -------------------------------------------------
+            // NEW SIGNAL CALLBACKS
+            // -------------------------------------------------
+
+            for (
+                const signal of extracted
+            ) {
                 if (
                     signal.state === "new" &&
                     typeof onNewGroupSignal ===
@@ -563,7 +1014,7 @@ function createNotificationFilter({
 
             return {
                 notificationsFound:
-                    groupNotifications.length,
+                    extracted.length,
 
                 newSignals,
 
@@ -575,6 +1026,7 @@ function createNotificationFilter({
         }
     };
 }
+
 
 module.exports = {
     createNotificationFilter
