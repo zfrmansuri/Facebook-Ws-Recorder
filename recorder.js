@@ -47,7 +47,33 @@ const INDICATORS = [
 // =========================================================
 
 function timestamp() {
-    return new Date().toISOString();
+    const now = new Date();
+
+    const datePart =
+        new Intl.DateTimeFormat(
+            "en-IN",
+            {
+                timeZone: "Asia/Kolkata",
+                weekday: "long",
+                day: "2-digit",
+                month: "long",
+                year: "numeric"
+            }
+        ).format(now);
+
+    const timePart =
+        new Intl.DateTimeFormat(
+            "en-IN",
+            {
+                timeZone: "Asia/Kolkata",
+                hour: "2-digit",
+                minute: "2-digit",
+                second: "2-digit",
+                hour12: true
+            }
+        ).format(now);
+
+    return `${datePart}, ${timePart}`;
 }
 
 
@@ -177,9 +203,12 @@ function decodePayload(response) {
 // CAPTURE SESSION
 // =========================================================
 
+const sessionTimestamp =
+    timestamp();
+
 const sessionId =
-    timestamp().replace(
-        /[:.]/g,
+    sessionTimestamp.replace(
+        /:/g,
         "-"
     );
 
@@ -215,7 +244,7 @@ console.log(
 );
 
 console.log(
-    `Session:   ${sessionId}`
+    `Session:   ${sessionTimestamp}`
 );
 
 console.log(
@@ -450,17 +479,17 @@ console.log("");
     );
 
     console.log(
-        `[MODE] Only decoded frames >= ${(LARGE_FRAME_THRESHOLD / 1024).toFixed(0)} KB are inspected`
+        "[MODE] Inspecting all decoded WebSocket frames"
     );
 
     console.log(
-        "[MODE] Large frames are saved"
+        `[MODE] Saving frames >= ${(LARGE_FRAME_THRESHOLD / 1024).toFixed(0)} KB`
     );
 
     console.log("");
 
     console.log(
-        "Waiting for large WebSocket payloads..."
+        "Waiting for WebSocket frames..."
     );
 
     console.log("");
@@ -529,8 +558,7 @@ console.log("");
 
 
                 // -------------------------------------------------
-                // Decode first because the threshold is based on
-                // actual decoded bytes, not Base64 length.
+                // Decode incoming payload.
                 // -------------------------------------------------
 
                 const decoded =
@@ -547,27 +575,32 @@ console.log("");
                     buffer.length;
 
 
-                // -------------------------------------------------
-                // Ignore everything below 20 KB.
-                //
-                // We deliberately do NOT care which socket this
-                // requestId belongs to.
-                // -------------------------------------------------
+                const rawPayloadSize =
+                    Buffer.byteLength(
+                        response.payloadData || ""
+                    );
+
+
+                // =================================================
+                // SMALL FRAME
+                // =================================================
 
                 if (
                     actualSize <
                     LARGE_FRAME_THRESHOLD
                 ) {
 
+                    console.log(
+                        `[FRAME] ${requestId} | ${actualSize} bytes | 👂 LISTENING / NOT SAVING`
+                    );
+
                     return;
                 }
 
 
-                // -------------------------------------------------
-                // Large frame.
-                //
-                // Now inspect its content.
-                // -------------------------------------------------
+                // =================================================
+                // LARGE FRAME
+                // =================================================
 
                 const decodedText =
                     buffer.toString(
@@ -590,6 +623,12 @@ console.log("");
 
                 const isNotificationCandidate =
                     matchedIndicators.length > 0;
+
+
+                const classification =
+                    isNotificationCandidate
+                        ? "notification_candidate"
+                        : "large_websocket_frame";
 
 
                 // -------------------------------------------------
@@ -640,14 +679,9 @@ console.log("");
                         actualSize,
 
                     raw_cdp_payload_size:
-                        Buffer.byteLength(
-                            response.payloadData || ""
-                        ),
+                        rawPayloadSize,
 
-                    classification:
-                        isNotificationCandidate
-                            ? "notification_candidate"
-                            : "large_websocket_frame",
+                    classification,
 
                     matched_indicators:
                         matchedIndicators,
@@ -668,58 +702,28 @@ console.log("");
 
 
                 // =================================================
-                // TERMINAL OUTPUT
+                // LARGE FRAME OUTPUT
                 // =================================================
 
-                console.log("");
-
-                console.log(
-                    "------------------------------------------------"
-                );
-
-                console.log(
-                    "🔥 LARGE WEBSOCKET FRAME"
-                );
-
-                console.log(
-                    `Request:       ${requestId}`
-                );
-
-                console.log(
-                    `Actual size:   ${(actualSize / 1024).toFixed(2)} KB`
-                );
-
-                console.log(
-                    `Raw payload:   ${(Buffer.byteLength(decoded.rawPayload) / 1024).toFixed(2)} KB`
-                );
-
-                console.log(
-                    `Classification: ${frame.classification}`
-                );
+                let output =
+                    `[FRAME] ${requestId} | ${(actualSize / 1024).toFixed(2)} KB | 💾 SAVED | ${classification}`;
 
 
                 if (
                     matchedIndicators.length > 0
                 ) {
 
-                    console.log(
-                        `Indicators:    ${matchedIndicators.join(", ")}`
-                    );
-
-                } else {
-
-                    console.log(
-                        "Indicators:    none"
-                    );
+                    output +=
+                        ` | ${matchedIndicators.join(", ")}`;
                 }
 
 
-                console.log(
-                    `Saved:         ${framesFile}`
-                );
+                output +=
+                    ` | ${framesFile}`;
+
 
                 console.log(
-                    "------------------------------------------------"
+                    output
                 );
 
             }
