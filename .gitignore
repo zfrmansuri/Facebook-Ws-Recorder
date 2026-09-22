@@ -1,0 +1,5 @@
+node_modules/
+captures/
+facebook-profile/
+.DS_Store
+npm-debug.log*

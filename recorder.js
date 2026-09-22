@@ -1,0 +1,774 @@
+const { chromium } = require("playwright");
+const fs = require("fs");
+const path = require("path");
+
+// =========================================================
+// CONFIGURATION
+// =========================================================
+
+const CDP_URL =
+    process.env.CDP_URL ||
+    "http://127.0.0.1:9222";
+
+const CAPTURE_ROOT =
+    path.join(__dirname, "captures");
+
+const START_URL =
+    "https://www.facebook.com/";
+
+// Notification payloads observed so far are >= 20 KB.
+// Size is measured AFTER decoding the CDP payload.
+const LARGE_FRAME_THRESHOLD =
+    20 * 1024;
+
+
+// =========================================================
+// NOTIFICATION INDICATORS
+// =========================================================
+
+const INDICATORS = [
+    "group_activity",
+    "all_posts",
+    "group_highlights",
+    "cometnotifications",
+    "cometnotificationsreceivelivequery",
+    "notifications_page",
+    "live_query",
+    "notif_type",
+    "context_id",
+    "content_id",
+    "overlay_has_group",
+    "multi_permalinks"
+];
+
+
+// =========================================================
+// HELPERS
+// =========================================================
+
+function timestamp() {
+    return new Date().toISOString();
+}
+
+
+function ensureDir(dir) {
+    fs.mkdirSync(
+        dir,
+        {
+            recursive: true
+        }
+    );
+}
+
+
+function safeName(value) {
+    return String(value).replace(
+        /[^a-zA-Z0-9._-]/g,
+        "_"
+    );
+}
+
+
+// =========================================================
+// DECODE WEBSOCKET PAYLOAD
+// =========================================================
+
+function decodePayload(response) {
+
+    const payload =
+        response.payloadData || "";
+
+    const opcode =
+        response.opcode;
+
+
+    // -------------------------------------------------------
+    // TEXT FRAME
+    // -------------------------------------------------------
+
+    if (opcode === 1) {
+
+        const buffer =
+            Buffer.from(
+                payload,
+                "utf8"
+            );
+
+        return {
+
+            buffer,
+
+            encoding:
+                "utf8",
+
+            rawPayload:
+                payload
+        };
+    }
+
+
+    // -------------------------------------------------------
+    // BINARY FRAME
+    // -------------------------------------------------------
+
+    if (opcode === 2) {
+
+        try {
+
+            const buffer =
+                Buffer.from(
+                    payload,
+                    "base64"
+                );
+
+            return {
+
+                buffer,
+
+                encoding:
+                    "base64",
+
+                rawPayload:
+                    payload
+            };
+
+        } catch {
+
+            return {
+
+                buffer:
+                    Buffer.from(
+                        payload,
+                        "utf8"
+                    ),
+
+                encoding:
+                    "unknown",
+
+                rawPayload:
+                    payload
+            };
+        }
+    }
+
+
+    // -------------------------------------------------------
+    // UNKNOWN OPCODE
+    // -------------------------------------------------------
+
+    return {
+
+        buffer:
+            Buffer.from(
+                payload,
+                "utf8"
+            ),
+
+        encoding:
+            "unknown",
+
+        rawPayload:
+            payload
+    };
+}
+
+
+// =========================================================
+// CAPTURE SESSION
+// =========================================================
+
+const sessionId =
+    timestamp().replace(
+        /[:.]/g,
+        "-"
+    );
+
+
+const sessionDir =
+    path.join(
+        CAPTURE_ROOT,
+        sessionId
+    );
+
+
+ensureDir(
+    sessionDir
+);
+
+
+// =========================================================
+// STARTUP
+// =========================================================
+
+console.log("");
+
+console.log(
+    "================================================"
+);
+
+console.log(
+    " Facebook Notification Recorder"
+);
+
+console.log(
+    "================================================"
+);
+
+console.log(
+    `Session:   ${sessionId}`
+);
+
+console.log(
+    `Output:    ${sessionDir}`
+);
+
+console.log(
+    `CDP:       ${CDP_URL}`
+);
+
+console.log(
+    `Threshold: ${(LARGE_FRAME_THRESHOLD / 1024).toFixed(0)} KB decoded`
+);
+
+console.log("");
+
+
+// =========================================================
+// MAIN
+// =========================================================
+
+(async () => {
+
+    let browser;
+
+    let cdp;
+
+    let page;
+
+
+    // =====================================================
+    // CONNECT TO EXISTING CHROME
+    // =====================================================
+
+    try {
+
+        console.log(
+            `[START] Connecting to Chrome at ${CDP_URL}...`
+        );
+
+
+        browser =
+            await chromium.connectOverCDP(
+                CDP_URL
+            );
+
+    } catch (error) {
+
+        console.error("");
+
+        console.error(
+            "[ERROR] Could not connect to Chrome via CDP."
+        );
+
+        console.error(
+            `        ${error.message}`
+        );
+
+        console.error("");
+
+        console.error(
+            "Start Chrome with:"
+        );
+
+        console.error(
+            "/Applications/Google\\ Chrome.app/Contents/MacOS/Google Chrome \\"
+        );
+
+        console.error(
+            "  --remote-debugging-port=9222 \\"
+        );
+
+        console.error(
+            '  --user-data-dir="/users/zafar/facebook-scraper-chrome"'
+        );
+
+        process.exit(1);
+    }
+
+
+    // =====================================================
+    // GET BROWSER CONTEXT
+    // =====================================================
+
+    const contexts =
+        browser.contexts();
+
+
+    if (
+        contexts.length === 0
+    ) {
+
+        console.error(
+            "[ERROR] No browser context found."
+        );
+
+        process.exit(1);
+    }
+
+
+    const context =
+        contexts[0];
+
+
+    const pages =
+        context.pages();
+
+
+    console.log(
+        `[READY] Connected to Chrome (${pages.length} existing page${pages.length === 1 ? "" : "s"})`
+    );
+
+
+    // =====================================================
+    // FIND EXACT FACEBOOK ROOT PAGE
+    // =====================================================
+
+    page =
+        pages.find(
+            existingPage => {
+
+                const url =
+                    existingPage.url();
+
+                return (
+                    url === "https://www.facebook.com/" ||
+                    url === "https://www.facebook.com"
+                );
+            }
+        );
+
+
+    // =====================================================
+    // FACEBOOK ROOT PAGE NOT OPEN
+    // =====================================================
+
+    if (!page) {
+
+        console.log(
+            "[PAGE] No https://www.facebook.com/ page found."
+        );
+
+        console.log(
+            "[PAGE] Opening Facebook in existing Chrome..."
+        );
+
+
+        page =
+            await context.newPage();
+
+
+        // Attach BEFORE navigation so we capture
+        // WebSocket activity created during navigation.
+        await attachToPage(
+            page
+        );
+
+
+        console.log(
+            "[PAGE] Navigating to Facebook..."
+        );
+
+
+        await page.goto(
+            START_URL,
+            {
+                waitUntil:
+                    "domcontentloaded"
+            }
+        );
+
+
+        console.log(
+            `[PAGE] Facebook loaded: ${page.url()}`
+        );
+    }
+
+
+    // =====================================================
+    // FACEBOOK ROOT PAGE ALREADY OPEN
+    // =====================================================
+
+    else {
+
+        console.log(
+            `[PAGE] Using existing Facebook page: ${page.url()}`
+        );
+
+        console.log(
+            "[PAGE] Attaching without reload..."
+        );
+
+
+        await attachToPage(
+            page
+        );
+    }
+
+
+    // =====================================================
+    // READY
+    // =====================================================
+
+    console.log("");
+
+    console.log(
+        "================================================"
+    );
+
+    console.log(
+        " 🚀 RECORDER IS RUNNING"
+    );
+
+    console.log(
+        "================================================"
+    );
+
+    console.log(
+        "[MODE] One Facebook page"
+    );
+
+    console.log(
+        "[MODE] One CDP session"
+    );
+
+    console.log(
+        "[MODE] No WebSocket requestId mapping"
+    );
+
+    console.log(
+        "[MODE] No streamcontroller filtering"
+    );
+
+    console.log(
+        `[MODE] Only decoded frames >= ${(LARGE_FRAME_THRESHOLD / 1024).toFixed(0)} KB are inspected`
+    );
+
+    console.log(
+        "[MODE] Large frames are saved"
+    );
+
+    console.log("");
+
+    console.log(
+        "Waiting for large WebSocket payloads..."
+    );
+
+    console.log("");
+
+    console.log(
+        "Press Ctrl+C to stop."
+    );
+
+    console.log("");
+
+
+    // =====================================================
+    // ATTACH TO ONE FACEBOOK PAGE
+    // =====================================================
+
+    async function attachToPage(targetPage) {
+
+        if (cdp) {
+            return;
+        }
+
+
+        console.log(
+            `[CDP] Attaching to: ${targetPage.url()}`
+        );
+
+
+        cdp =
+            await context.newCDPSession(
+                targetPage
+            );
+
+
+        await cdp.send(
+            "Network.enable"
+        );
+
+
+        console.log(
+            "[CDP] Network monitoring enabled"
+        );
+
+        console.log(
+            "[CDP] Listening for WebSocket frames"
+        );
+
+
+        // =================================================
+        // WEBSOCKET FRAME RECEIVED
+        // =================================================
+
+        cdp.on(
+            "Network.webSocketFrameReceived",
+            event => {
+
+                const {
+
+                    requestId,
+
+                    timestamp:
+                        chromeTimestamp,
+
+                    response
+
+                } = event;
+
+
+                // -------------------------------------------------
+                // Decode first because the threshold is based on
+                // actual decoded bytes, not Base64 length.
+                // -------------------------------------------------
+
+                const decoded =
+                    decodePayload(
+                        response
+                    );
+
+
+                const buffer =
+                    decoded.buffer;
+
+
+                const actualSize =
+                    buffer.length;
+
+
+                // -------------------------------------------------
+                // Ignore everything below 20 KB.
+                //
+                // We deliberately do NOT care which socket this
+                // requestId belongs to.
+                // -------------------------------------------------
+
+                if (
+                    actualSize <
+                    LARGE_FRAME_THRESHOLD
+                ) {
+
+                    return;
+                }
+
+
+                // -------------------------------------------------
+                // Large frame.
+                //
+                // Now inspect its content.
+                // -------------------------------------------------
+
+                const decodedText =
+                    buffer.toString(
+                        "utf8"
+                    );
+
+
+                const lower =
+                    decodedText.toLowerCase();
+
+
+                const matchedIndicators =
+                    INDICATORS.filter(
+                        indicator =>
+                            lower.includes(
+                                indicator
+                            )
+                    );
+
+
+                const isNotificationCandidate =
+                    matchedIndicators.length > 0;
+
+
+                // -------------------------------------------------
+                // Capture directory
+                // -------------------------------------------------
+
+                const requestDir =
+                    path.join(
+                        sessionDir,
+                        `large-frame-${safeName(requestId)}`
+                    );
+
+
+                ensureDir(
+                    requestDir
+                );
+
+
+                const framesFile =
+                    path.join(
+                        requestDir,
+                        "frames.jsonl"
+                    );
+
+
+                // -------------------------------------------------
+                // Save complete raw payload + metadata
+                // -------------------------------------------------
+
+                const frame = {
+
+                    received_at:
+                        timestamp(),
+
+                    chrome_timestamp:
+                        chromeTimestamp,
+
+                    request_id:
+                        requestId,
+
+                    opcode:
+                        response.opcode,
+
+                    payload_encoding:
+                        decoded.encoding,
+
+                    actual_size:
+                        actualSize,
+
+                    raw_cdp_payload_size:
+                        Buffer.byteLength(
+                            response.payloadData || ""
+                        ),
+
+                    classification:
+                        isNotificationCandidate
+                            ? "notification_candidate"
+                            : "large_websocket_frame",
+
+                    matched_indicators:
+                        matchedIndicators,
+
+                    payload:
+                        decoded.rawPayload
+                };
+
+
+                fs.appendFileSync(
+
+                    framesFile,
+
+                    JSON.stringify(
+                        frame
+                    ) + "\n"
+                );
+
+
+                // =================================================
+                // TERMINAL OUTPUT
+                // =================================================
+
+                console.log("");
+
+                console.log(
+                    "------------------------------------------------"
+                );
+
+                console.log(
+                    "🔥 LARGE WEBSOCKET FRAME"
+                );
+
+                console.log(
+                    `Request:       ${requestId}`
+                );
+
+                console.log(
+                    `Actual size:   ${(actualSize / 1024).toFixed(2)} KB`
+                );
+
+                console.log(
+                    `Raw payload:   ${(Buffer.byteLength(decoded.rawPayload) / 1024).toFixed(2)} KB`
+                );
+
+                console.log(
+                    `Classification: ${frame.classification}`
+                );
+
+
+                if (
+                    matchedIndicators.length > 0
+                ) {
+
+                    console.log(
+                        `Indicators:    ${matchedIndicators.join(", ")}`
+                    );
+
+                } else {
+
+                    console.log(
+                        "Indicators:    none"
+                    );
+                }
+
+
+                console.log(
+                    `Saved:         ${framesFile}`
+                );
+
+                console.log(
+                    "------------------------------------------------"
+                );
+
+            }
+        );
+    }
+
+
+    // =====================================================
+    // SHUTDOWN
+    // =====================================================
+
+    process.on(
+        "SIGINT",
+        async () => {
+
+            console.log("");
+
+            console.log(
+                "[STOP] Stopping recorder..."
+            );
+
+            console.log(
+                `[STOP] Capture saved at: ${sessionDir}`
+            );
+
+            console.log(
+                "[STOP] Chrome will remain running."
+            );
+
+            console.log("");
+
+
+            try {
+
+                if (cdp) {
+
+                    await cdp.detach();
+
+                }
+
+            } catch {
+
+                // Ignore detach errors during shutdown.
+
+            }
+
+
+            process.exit(0);
+        }
+    );
+
+})();
