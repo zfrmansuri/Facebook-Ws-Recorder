@@ -15,15 +15,8 @@ const NOTIFICATION_INDICATORS = [
     "multi_permalinks"
 ];
 
-
-// =========================================================
-// FILE
-// =========================================================
-
 function appendJsonl(file, value) {
-    if (!file) {
-        return;
-    }
+    if (!file) return;
 
     fs.appendFileSync(
         file,
@@ -31,49 +24,35 @@ function appendJsonl(file, value) {
     );
 }
 
-
-// =========================================================
-// OBJECT WALKER
-// =========================================================
-
+/*
+ * Walk objects in natural JSON order.
+ *
+ * The previous implementation used a stack and therefore
+ * reversed sibling traversal order. We need the first
+ * relevant notification in the actual payload order.
+ */
 function walk(root, visitor) {
-    const stack = [root];
     const visited = new Set();
 
-    while (stack.length > 0) {
-        const current = stack.pop();
-
+    function visit(value) {
         if (
-            current === null ||
-            current === undefined ||
-            typeof current !== "object"
+            value === null ||
+            typeof value !== "object" ||
+            visited.has(value)
         ) {
-            continue;
+            return;
         }
 
-        if (visited.has(current)) {
-            continue;
-        }
+        visited.add(value);
+        visitor(value);
 
-        visited.add(current);
-
-        visitor(current);
-
-        for (const value of Object.values(current)) {
-            if (
-                value !== null &&
-                typeof value === "object"
-            ) {
-                stack.push(value);
-            }
+        for (const child of Object.values(value)) {
+            visit(child);
         }
     }
+
+    visit(root);
 }
-
-
-// =========================================================
-// SAFE JSON PARSING
-// =========================================================
 
 function parseJsonString(value) {
     if (
@@ -94,48 +73,23 @@ function parseJsonString(value) {
     }
 }
 
-
-// =========================================================
-// BALANCED JSON EXTRACTION
-//
-// Facebook prepends binary/protocol bytes before the JSON.
-// We therefore cannot JSON.parse(decodedText) directly.
-//
-// This parser understands strings and escaped characters,
-// so braces inside URLs/text/tracking strings do not break it.
-// =========================================================
-
 function extractBalancedJson(text, start) {
     if (
         start < 0 ||
-        start >= text.length
-    ) {
-        return null;
-    }
-
-    const opening = text[start];
-
-    if (
-        opening !== "{" &&
-        opening !== "["
+        start >= text.length ||
+        (text[start] !== "{" && text[start] !== "[")
     ) {
         return null;
     }
 
     const stack = [
-        opening === "{"
-            ? "}"
-            : "]"
+        text[start] === "{" ? "}" : "]"
     ];
 
     let inString = false;
     let escaped = false;
 
-    for (
-        let i = start + 1;
-        i < text.length;
-        i++
-    ) {
+    for (let i = start + 1; i < text.length; i++) {
         const char = text[i];
 
         if (inString) {
@@ -155,38 +109,22 @@ function extractBalancedJson(text, start) {
             continue;
         }
 
-        if (
-            char === "{" ||
-            char === "["
-        ) {
+        if (char === "{" || char === "[") {
             stack.push(
-                char === "{"
-                    ? "}"
-                    : "]"
+                char === "{" ? "}" : "]"
             );
-
             continue;
         }
 
-        if (
-            char === "}" ||
-            char === "]"
-        ) {
-            if (
-                stack[
-                    stack.length - 1
-                ] !== char
-            ) {
+        if (char === "}" || char === "]") {
+            if (stack[stack.length - 1] !== char) {
                 return null;
             }
 
             stack.pop();
 
             if (stack.length === 0) {
-                return text.slice(
-                    start,
-                    i + 1
-                );
+                return text.slice(start, i + 1);
             }
         }
     }
@@ -194,72 +132,60 @@ function extractBalancedJson(text, start) {
     return null;
 }
 
+function containsNotificationsPage(root) {
+    let found = false;
 
-// =========================================================
-// FIND MAIN FACEBOOK JSON ROOT
-//
-// Current payload shape:
-//
-// [binary protocol prefix]
-// {"last_response_digest":"..."}
-// [binary bytes]
-// {"data":{...notifications_page...}}
-//
-// We specifically search for JSON roots beginning with
-// {"data": and choose the one containing notifications_page.
-//
-// We do NOT assume byte offset 79/80.
-// =========================================================
+    walk(root, object => {
+        if (
+            Object.prototype.hasOwnProperty.call(
+                object,
+                "notifications_page"
+            )
+        ) {
+            found = true;
+        }
+    });
+
+    return found;
+}
 
 function parsePayloadJson(text) {
-    const rootMarkers = [
+    const markers = [
         "{\"data\":",
         "{\"data\" :"
     ];
 
     let searchFrom = 0;
 
-    while (
-        searchFrom < text.length
-    ) {
-        let bestIndex = -1;
+    while (searchFrom < text.length) {
+        let index = -1;
 
-        for (
-            const marker of rootMarkers
-        ) {
-            const index =
-                text.indexOf(
-                    marker,
-                    searchFrom
-                );
+        for (const marker of markers) {
+            const found = text.indexOf(
+                marker,
+                searchFrom
+            );
 
             if (
-                index !== -1 &&
-                (
-                    bestIndex === -1 ||
-                    index < bestIndex
-                )
+                found !== -1 &&
+                (index === -1 || found < index)
             ) {
-                bestIndex = index;
+                index = found;
             }
         }
 
-        if (bestIndex === -1) {
+        if (index === -1) {
             break;
         }
 
-        const candidate =
-            extractBalancedJson(
-                text,
-                bestIndex
-            );
+        const candidate = extractBalancedJson(
+            text,
+            index
+        );
 
         if (candidate) {
             try {
-                const parsed =
-                    JSON.parse(
-                        candidate
-                    );
+                const parsed = JSON.parse(candidate);
 
                 if (
                     parsed &&
@@ -268,28 +194,19 @@ function parsePayloadJson(text) {
                     return parsed;
                 }
             } catch {
-                // Continue searching for another root.
+                // Keep looking.
             }
         }
 
-        searchFrom =
-            bestIndex + 1;
+        searchFrom = index + 1;
     }
 
-    // -----------------------------------------------------
-    // Fallback:
-    //
-    // If Facebook changes whitespace or the root shape,
-    // scan JSON-looking objects but cap the attempts so
-    // this cannot become an expensive O(n²) operation.
-    // -----------------------------------------------------
-
+    // Fallback for minor Facebook payload format changes.
     let attempts = 0;
 
     for (
         let i = 0;
-        i < text.length &&
-        attempts < 200;
+        i < text.length && attempts < 200;
         i++
     ) {
         if (
@@ -301,200 +218,97 @@ function parsePayloadJson(text) {
 
         attempts++;
 
-        const candidate =
-            extractBalancedJson(
-                text,
-                i
-            );
+        const candidate = extractBalancedJson(
+            text,
+            i
+        );
 
-        if (!candidate) {
-            continue;
-        }
+        if (!candidate) continue;
 
         try {
-            const parsed =
-                JSON.parse(
-                    candidate
-                );
+            const parsed = JSON.parse(candidate);
 
             if (
                 parsed &&
                 typeof parsed === "object" &&
-                containsNotificationsPage(
-                    parsed
-                )
+                containsNotificationsPage(parsed)
             ) {
                 return parsed;
             }
         } catch {
-            // Try next candidate.
+            // Keep looking.
         }
     }
 
     return null;
 }
 
-
-// =========================================================
-// CHECK WHETHER AN OBJECT CONTAINS notifications_page
-// =========================================================
-
-function containsNotificationsPage(root) {
-    let found = false;
-
-    walk(
-        root,
-        object => {
-            if (
-                Object.prototype.hasOwnProperty.call(
-                    object,
-                    "notifications_page"
-                )
-            ) {
-                found = true;
-            }
-        }
-    );
-
-    return found;
-}
-
-
-// =========================================================
-// FIND ACTUAL NOTIFICATION OBJECTS
-//
-// Important:
-//
-// tracking itself contains:
-//
-// {
-//     "notif_type": "group_activity",
-//     "subtype": "all_posts",
-//     ...
-// }
-//
-// Therefore we MUST require the outer object to also have
-// a "tracking" property.
-//
-// This prevents the tracking JSON object itself from being
-// mistaken for the notification.
-// =========================================================
-
 function findNotificationObjects(root) {
     const notifications = [];
 
-    walk(
-        root,
-        object => {
-            if (
-                typeof object.notif_type !==
-                    "string"
-            ) {
-                return;
-            }
-
-            const hasTracking =
-                typeof object.tracking ===
-                    "string" ||
-                (
-                    object.tracking !== null &&
-                    typeof object.tracking ===
-                        "object"
-                );
-
-            if (!hasTracking) {
-                return;
-            }
-
-            notifications.push(
-                object
-            );
+    walk(root, object => {
+        if (
+            typeof object.notif_type !== "string"
+        ) {
+            return;
         }
-    );
+
+        const hasTracking =
+            typeof object.tracking === "string" ||
+            (
+                object.tracking &&
+                typeof object.tracking === "object"
+            );
+
+        if (hasTracking) {
+            notifications.push(object);
+        }
+    });
 
     return notifications;
 }
 
-
-// =========================================================
-// FIND GROUP ENTITY
-// =========================================================
-
 function findGroupEntity(body) {
     let result = null;
 
-    walk(
-        body,
-        object => {
-            if (result) {
-                return;
-            }
-
-            if (
-                !object.entity ||
-                typeof object.entity !==
-                    "object"
-            ) {
-                return;
-            }
-
-            const entity =
-                object.entity;
-
-            if (!entity.id) {
-                return;
-            }
-
-            const type =
-                String(
-                    entity.__typename ||
-                    entity.type ||
-                    ""
-                ).toLowerCase();
-
-            const url =
-                String(
-                    entity.url ||
-                    entity.profile_url ||
-                    ""
-                ).toLowerCase();
-
-            if (
-                type.includes("group") ||
-                url.includes("/groups/")
-            ) {
-                result = entity;
-            }
+    walk(body, object => {
+        if (result || !object.entity) {
+            return;
         }
-    );
+
+        const entity = object.entity;
+
+        if (!entity.id) {
+            return;
+        }
+
+        const type = String(
+            entity.__typename ||
+            entity.type ||
+            ""
+        ).toLowerCase();
+
+        const url = String(
+            entity.url ||
+            entity.profile_url ||
+            ""
+        ).toLowerCase();
+
+        if (
+            type.includes("group") ||
+            url.includes("/groups/")
+        ) {
+            result = entity;
+        }
+    });
 
     return result;
 }
 
-
-// =========================================================
-// GROUP NAME
-//
-// Group entities in the captured payload often contain no
-// "name" field.
-//
-// Examples of body.text:
-//
-// "Now in Luxury Real Estate Group: \"...\""
-// "Now in Real Estate & Construction Business: \"...\""
-// "USA Real Estate Investors has a new post."
-// =========================================================
-
-function deriveGroupName(
-    groupEntity,
-    bodyText
-) {
+function deriveGroupName(groupEntity, bodyText) {
     if (
         groupEntity &&
-        (
-            groupEntity.name ||
-            groupEntity.title
-        )
+        (groupEntity.name || groupEntity.title)
     ) {
         return (
             groupEntity.name ||
@@ -502,37 +316,44 @@ function deriveGroupName(
         );
     }
 
-    if (
-        typeof bodyText !== "string"
-    ) {
+    if (typeof bodyText !== "string") {
         return null;
     }
 
-    const nowInMatch =
-        bodyText.match(
-            /^Now in\s+(.+?):\s*/i
-        );
+    const nowIn = bodyText.match(
+        /^Now in\s+(.+?):\s*/i
+    );
 
-    if (nowInMatch) {
-        return nowInMatch[1].trim();
+    if (nowIn) {
+        return nowIn[1].trim();
     }
 
-    const newPostMatch =
-        bodyText.match(
-            /^(.+?)\s+has a new post\.?$/i
-        );
+    const newPost = bodyText.match(
+        /^(.+?)\s+has a new post\.?$/i
+    );
 
-    if (newPostMatch) {
-        return newPostMatch[1].trim();
+    if (newPost) {
+        return newPost[1].trim();
     }
 
     return null;
 }
 
+function getQueryParameter(url, parameter) {
+    if (typeof url !== "string") {
+        return null;
+    }
 
-// =========================================================
-// NORMALIZE ID
-// =========================================================
+    try {
+        return (
+            new URL(url)
+                .searchParams
+                .get(parameter) || null
+        );
+    } catch {
+        return null;
+    }
+}
 
 function normalizeId(value) {
     if (
@@ -546,76 +367,31 @@ function normalizeId(value) {
     return String(value);
 }
 
-
-// =========================================================
-// URL QUERY PARAMETER
-// =========================================================
-
-function getQueryParameter(
-    url,
-    parameter
-) {
-    if (
-        typeof url !== "string"
-    ) {
-        return null;
-    }
-
-    try {
-        const parsed =
-            new URL(url);
-
-        return (
-            parsed.searchParams.get(
-                parameter
-            ) || null
-        );
-    } catch {
-        // Facebook URLs can occasionally be
-        // partially malformed. Use a fallback.
-        const escaped =
-            parameter.replace(
-                /[.*+?^${}()|[\]\\]/g,
-                "\\$&"
-            );
-
-        const match =
-            url.match(
-                new RegExp(
-                    `[?&]${escaped}=([^&#]+)`
-                )
-            );
-
-        return match
-            ? decodeURIComponent(
-                match[1]
-            )
-            : null;
-    }
+function timestampIST() {
+    return new Date().toLocaleString(
+        "en-IN",
+        {
+            timeZone: "Asia/Kolkata",
+            year: "numeric",
+            month: "2-digit",
+            day: "2-digit",
+            hour: "2-digit",
+            minute: "2-digit",
+            second: "2-digit",
+            hour12: false
+        }
+    );
 }
-
-
-// =========================================================
-// CREATE FILTER
-// =========================================================
 
 function createNotificationFilter({
     recordFile,
     onNewGroupSignal
 }) {
-    const seenEvents = new Set();
-
-    let baselineEstablished = false;
-
     return {
-        process(
-            decodedText,
-            frameContext = {}
-        ) {
+        process(decodedText, frameContext = {}) {
             if (
-                typeof decodedText !==
-                "string" ||
-                decodedText.length === 0
+                typeof decodedText !== "string" ||
+                !decodedText
             ) {
                 return {
                     notificationsFound: 0,
@@ -625,22 +401,17 @@ function createNotificationFilter({
                 };
             }
 
-            // -------------------------------------------------
-            // CHEAP FIRST PASS
-            // -------------------------------------------------
-
-            const lower =
-                decodedText.toLowerCase();
+            const lower = decodedText.toLowerCase();
 
             const matchedIndicators =
                 NOTIFICATION_INDICATORS.filter(
                     indicator =>
-                        lower.includes(
-                            indicator
-                        )
+                        lower.includes(indicator)
                 );
 
-            // Most WebSocket frames die here.
+            /*
+             * Almost every WebSocket frame stops here.
+             */
             if (
                 !lower.includes(
                     "notifications_page"
@@ -654,16 +425,34 @@ function createNotificationFilter({
                 };
             }
 
-            // -------------------------------------------------
-            // PARSE FACEBOOK JSON ROOT
-            // -------------------------------------------------
-
-            const root =
-                parsePayloadJson(
-                    decodedText
-                );
+            const root = parsePayloadJson(
+                decodedText
+            );
 
             if (!root) {
+                const result = {
+                    recorded_at:
+                        timestampIST(),
+
+                    received_at:
+                        frameContext.receivedAt || null,
+
+                    request_id:
+                        frameContext.requestId || null,
+
+                    chrome_timestamp:
+                        frameContext.chromeTimestamp || null,
+
+                    parse_failed: true,
+
+                    matchedIndicators
+                };
+
+                appendJsonl(
+                    recordFile,
+                    result
+                );
+
                 return {
                     notificationsFound: 0,
                     newSignals: 0,
@@ -673,40 +462,19 @@ function createNotificationFilter({
                 };
             }
 
-            // -------------------------------------------------
-            // FIND OUTER NOTIFICATION OBJECTS
-            // -------------------------------------------------
-
             const notifications =
-                findNotificationObjects(
-                    root
-                );
+                findNotificationObjects(root);
 
-            if (
-                notifications.length === 0
-            ) {
-                return {
-                    notificationsFound: 0,
-                    newSignals: 0,
-                    matchedIndicators,
-                    events: []
-                };
-            }
+            /*
+             * Find the FIRST relevant notification
+             * in actual JSON order.
+             *
+             * This is the event-bearing notification
+             * according to our observed Facebook payloads.
+             */
+            let selected = null;
 
-            // -------------------------------------------------
-            // IMPORTANT:
-            //
-            // Parse tracking BEFORE checking subtype.
-            //
-            // subtype is inside tracking in the real payload.
-            // -------------------------------------------------
-
-            const candidates = [];
-
-            for (
-                const notification of
-                    notifications
-            ) {
+            for (const notification of notifications) {
                 if (
                     notification.notif_type !==
                     "group_activity"
@@ -723,28 +491,26 @@ function createNotificationFilter({
                     continue;
                 }
 
-                const subtype =
-                    String(
-                        tracking.subtype ||
-                        ""
-                    );
-
                 if (
-                    subtype !==
+                    tracking.subtype !==
                     "all_posts"
                 ) {
                     continue;
                 }
 
-                candidates.push({
+                selected = {
                     notification,
                     tracking
-                });
+                };
+
+                break;
             }
 
-            if (
-                candidates.length === 0
-            ) {
+            /*
+             * No relevant group-post notification
+             * in this response.
+             */
+            if (!selected) {
                 return {
                     notificationsFound: 0,
                     newSignals: 0,
@@ -753,280 +519,150 @@ function createNotificationFilter({
                 };
             }
 
-            // -------------------------------------------------
-            // DEDUPLICATE WITHIN THIS SINGLE RESPONSE
-            //
-            // Facebook sends the same notification twice:
-            //
-            // notif
-            // navigation_endpoint...notif
-            //
-            // Both represent the same event.
-            // -------------------------------------------------
+            const {
+                notification,
+                tracking
+            } = selected;
 
-            const frameEventKeys =
-                new Set();
+            /*
+             * context_id is the Facebook Group ID.
+             *
+             * We intentionally do not use content_id,
+             * notif_id or multi_permalinks to wake the
+             * scanner.
+             */
+            const groupId = normalizeId(
+                tracking.context_id
+            );
 
-            const extracted = [];
+            const groupEntity =
+                findGroupEntity(
+                    notification.body
+                );
 
-            let newSignals = 0;
+            const embeddedGroupId =
+                normalizeId(
+                    groupEntity &&
+                    groupEntity.id
+                );
 
-            for (
-                const {
-                    notification,
-                    tracking
-                } of candidates
-            ) {
-                const contextId =
-                    normalizeId(
-                        tracking.context_id
-                    );
+            const bodyText =
+                notification.body &&
+                typeof notification.body.text ===
+                    "string"
+                    ? notification.body.text
+                    : null;
 
-                const contentId =
-                    normalizeId(
-                        tracking.content_id
-                    );
+            const event = {
+                recorded_at:
+                    timestampIST(),
 
-                const notifId =
-                    normalizeId(
-                        tracking.notif_id ||
-                        tracking.alert_id ||
-                        notification.notif_id
-                    );
+                received_at:
+                    frameContext.receivedAt || null,
 
-                const groupEntity =
-                    findGroupEntity(
-                        notification.body
-                    );
+                request_id:
+                    frameContext.requestId || null,
 
-                const groupId =
-                    normalizeId(
-                        groupEntity &&
-                        groupEntity.id
-                    );
+                chrome_timestamp:
+                    frameContext.chromeTimestamp || null,
 
-                const groupUrl =
+                notif_type:
+                    notification.notif_type,
+
+                subtype:
+                    tracking.subtype || null,
+
+                group_id:
+                    groupId,
+
+                group_name:
+                    deriveGroupName(
+                        groupEntity,
+                        bodyText
+                    ),
+
+                group_url:
                     groupEntity &&
                     (
                         groupEntity.url ||
                         groupEntity.profile_url ||
                         null
-                    );
+                    ),
 
-                const bodyText =
-                    notification.body &&
-                    typeof notification.body.text ===
-                        "string"
-                        ? notification.body.text
-                        : null;
+                context_id:
+                    groupId,
 
-                const groupName =
-                    deriveGroupName(
-                        groupEntity,
-                        bodyText
-                    );
+                embedded_group_id:
+                    embeddedGroupId,
 
-                const contextMatchesGroup =
-                    Boolean(
-                        contextId &&
-                        groupId &&
-                        contextId === groupId
-                    );
+                content_id:
+                    normalizeId(
+                        tracking.content_id
+                    ),
 
-                const notificationUrl =
-                    notification.url ||
-                    null;
+                notif_id:
+                    normalizeId(
+                        tracking.notif_id ||
+                        tracking.alert_id ||
+                        notification.notif_id
+                    ),
 
-                const multiPermalinks =
+                microtime_sent:
+                    tracking.microtime_sent ??
+                    null,
+
+                creation_time:
+                    notification.creation_time ??
+                    null,
+
+                notification_url:
+                    notification.url || null,
+
+                multi_permalinks:
                     getQueryParameter(
-                        notificationUrl,
+                        notification.url,
                         "multi_permalinks"
-                    );
+                    ),
 
-                // -------------------------------------------------
-                // We currently use context_id + content_id as
-                // the stable event identity.
-                //
-                // Do NOT call multi_permalinks the canonical
-                // post ID yet. Your captures show that it can
-                // differ from content_id.
-                // -------------------------------------------------
+                notification_text:
+                    bodyText
+            };
 
-                const eventKey =
-                    contextId &&
-                    contentId
-                        ? `${contextId}:${contentId}`
-                        : null;
+            /*
+             * One JSONL record for one relevant
+             * WebSocket response.
+             *
+             * This is kept specifically so we can
+             * inspect what Facebook sent.
+             */
+            appendJsonl(
+                recordFile,
+                event
+            );
 
-                // Invalid/incomplete notification.
-                if (
-                    !contextMatchesGroup ||
-                    !eventKey
-                ) {
-                    continue;
-                }
-
-                // Duplicate copy inside the same WebSocket frame.
-                if (
-                    frameEventKeys.has(
-                        eventKey
-                    )
-                ) {
-                    continue;
-                }
-
-                frameEventKeys.add(
-                    eventKey
-                );
-
-                let state;
-
-                if (
-                    !baselineEstablished
-                ) {
-                    state = "baseline";
-                } else if (
-                    seenEvents.has(
-                        eventKey
-                    )
-                ) {
-                    state = "duplicate";
-                } else {
-                    state = "new";
-                    newSignals++;
-                }
-
-                seenEvents.add(
-                    eventKey
-                );
-
-                const event = {
-                    recorded_at:
-                        new Date().toISOString(),
-
-                    received_at:
-                        frameContext.receivedAt ||
-                        null,
-
-                    request_id:
-                        frameContext.requestId ||
-                        null,
-
-                    chrome_timestamp:
-                        frameContext.chromeTimestamp ||
-                        null,
-
-                    notif_type:
-                        notification.notif_type,
-
-                    subtype:
-                        tracking.subtype ||
-                        null,
-
-                    state,
-
-                    event_key:
-                        eventKey,
-
-                    group_id:
-                        groupId,
-
-                    group_name:
-                        groupName,
-
-                    group_url:
-                        groupUrl,
-
-                    context_id:
-                        contextId,
-
-                    content_id:
-                        contentId,
-
-                    notif_id:
-                        notifId,
-
-                    microtime_sent:
-                        tracking.microtime_sent ??
-                        null,
-
-                    creation_time:
-                        notification.creation_time ??
-                        null,
-
-                    context_matches_group:
-                        contextMatchesGroup,
-
-                    notification_url:
-                        notificationUrl,
-
-                    multi_permalinks:
-                        multiPermalinks,
-
-                    notification_text:
-                        bodyText
-                };
-
-                appendJsonl(
-                    recordFile,
-                    event
-                );
-
-                extracted.push(
-                    event
-                );
-            }
-
-            // -------------------------------------------------
-            // BASELINE
-            //
-            // The first valid batch establishes the existing
-            // notification state.
-            //
-            // If a response contains no valid group events,
-            // baseline remains untouched.
-            // -------------------------------------------------
-
+            /*
+             * One response = one signal.
+             *
+             * No baseline.
+             * No cross-response deduplication.
+             */
             if (
-                extracted.length > 0 &&
-                !baselineEstablished
+                groupId &&
+                typeof onNewGroupSignal ===
+                    "function"
             ) {
-                baselineEstablished = true;
-            }
-
-            // -------------------------------------------------
-            // NEW SIGNAL CALLBACKS
-            // -------------------------------------------------
-
-            for (
-                const signal of extracted
-            ) {
-                if (
-                    signal.state === "new" &&
-                    typeof onNewGroupSignal ===
-                        "function"
-                ) {
-                    onNewGroupSignal(
-                        signal
-                    );
-                }
+                onNewGroupSignal(event);
             }
 
             return {
-                notificationsFound:
-                    extracted.length,
-
-                newSignals,
-
+                notificationsFound: 1,
+                newSignals: groupId ? 1 : 0,
                 matchedIndicators,
-
-                events:
-                    extracted
+                events: [event]
             };
         }
     };
 }
-
 
 module.exports = {
     createNotificationFilter

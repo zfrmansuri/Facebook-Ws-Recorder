@@ -758,7 +758,7 @@ console.log("");
                 // =================================================
 
                 let output =
-                    `[FRAME] ${requestId} | ${(actualSize / 1024).toFixed(2)} KB | 💾 SAVED | ${classification}`;
+                    `❗️❗️[FRAME] ${requestId} | ${(actualSize / 1024).toFixed(2)} KB | 💾 SAVED | ${classification}❗️❗️`;
 
 
                 if (
