@@ -1,4 +1,5 @@
 const { chromium } = require("playwright");
+const { scrapeGroup } = require("./facebook-scraper");
 const fs = require("fs");
 const path = require("path");
 const {
@@ -219,29 +220,45 @@ const notificationRecordFile =
     );
 
 
+const notificationVerdictFile =
+    path.join(
+        sessionDir,
+        "group-verdicts.jsonl"
+    );
+
+
+// Create both files empty at startup so `tail -f` works
+// immediately, even before any notification frame arrives.
+fs.writeFileSync(
+    notificationRecordFile,
+    ""
+);
+
+fs.writeFileSync(
+    notificationVerdictFile,
+    ""
+);
+
+
 const notificationFilter =
     createNotificationFilter({
         recordFile:
             notificationRecordFile,
 
+        verdictFile:
+            notificationVerdictFile,
+
+        scrapeGroup,
+
         onNewGroupSignal:
             signal => {
 
-                let output =
-                    `[GROUP SIGNAL] ${signal.group_id} | ${signal.group_name || "Unknown Group"}`;
-
-                if (
-                    signal.content_id
-                ) {
-                    output +=
-                        ` | content=${signal.content_id}`;
-                }
-
-                output +=
-                    " | 🆕 NEW";
-
+                // signal.line is the pre-formatted verdict string:
+                //   [12:49:51 am] 🎯 LuxuryRealEstateGroup (1763837817231349) | notif=... | content=... | gap=170s
+                // or:
+                //   [12:50:03 am] ⏸ heartbeat — no new event
                 console.log(
-                    output
+                    signal.line
                 );
             }
     });
@@ -514,6 +531,10 @@ console.log("");
 
     console.log(
         `[MODE] Notification records: ${notificationRecordFile}`
+    );
+
+    console.log(
+        `[MODE] Group verdicts:       ${notificationVerdictFile}`
     );
 
     console.log("");
@@ -803,6 +824,10 @@ console.log("");
 
             console.log(
                 `[STOP] Notification records saved at: ${notificationRecordFile}`
+            );
+
+            console.log(
+                `[STOP] Group verdicts saved at:      ${notificationVerdictFile}`
             );
 
             console.log(
